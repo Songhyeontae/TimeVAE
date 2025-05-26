@@ -58,6 +58,7 @@ def run_vae_pipeline(dataset_name: str, vae_type: str):
         train_data=scaled_train_data,
         max_epochs=100,
         verbose=1,
+        dataset_name=dataset_name
     )
 
     # ----------------------------------------------------------------------------------
