@@ -1,5 +1,6 @@
 import os
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -7,6 +8,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import joblib
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
 
 class Sampling(nn.Module):
@@ -45,11 +48,55 @@ class VAE_Base(nn.Module, ABC):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
         
+        # Create log directory with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        log_dir = f'runs/{timestamp}_{self.model_name}_seq{self.seq_len}_lat{self.latent_dim}_trans{self.use_transformer}'
+        writer = SummaryWriter(log_dir)
+        
+        # Save experiment configuration as text
+        config_text = f"""
+        Model Configuration:
+        -------------------
+        Model Name: {self.model_name}
+        Sequence Length: {self.seq_len}
+        Feature Dimension: {self.feat_dim}
+        
+        Architecture:
+        ------------
+        Latent Dimension: {self.latent_dim}
+        Hidden Layer Sizes: {getattr(self, 'hidden_layer_sizes', 'Not specified')}
+        Use Transformer: {self.use_transformer}
+        Use Residual Connection: {getattr(self, 'use_residual_conn', False)}
+        Latent Token Dimension: {getattr(self, 'latent_token_dim', 'N/A')}
+        Trend Polynomial Degree: {getattr(self, 'trend_poly', 'N/A')}
+        Custom Seasonality: {getattr(self, 'custom_seas', None)}
+        
+        Training Parameters:
+        ------------------
+        Batch Size: {self.batch_size}
+        Max Epochs: {max_epochs}
+        Learning Rate: {0.002}  # Adam optimizer default
+        Device: {device}
+        
+        Loss Weights:
+        ------------
+        Reconstruction Weight: {self.reconstruction_wt}
+        Z KL Weight: {self.z_kl_wt}
+        
+        Runtime Info:
+        ------------
+        Timestamp: {timestamp}
+        Total Parameters: {self.get_num_trainable_variables():,}
+        """
+        writer.add_text('Experiment Config', config_text)
+        
         train_tensor = torch.FloatTensor(train_data).to(device)
         train_dataset = TensorDataset(train_tensor)
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
         optimizer = optim.Adam(self.parameters(), lr=0.002)
+        
+        global_step = 0
         
         for epoch in range(max_epochs):
             self.train()
@@ -57,7 +104,7 @@ class VAE_Base(nn.Module, ABC):
             reconstruction_loss = 0
             kl_loss = 0
             
-            for batch in train_loader:
+            for batch_idx, batch in enumerate(train_loader):
                 X = batch[0]
                 optimizer.zero_grad()
                 
@@ -78,21 +125,82 @@ class VAE_Base(nn.Module, ABC):
                 loss.backward()
                 optimizer.step()
                 
+                # Log batch-level metrics
+                writer.add_scalar('Loss/batch/total', loss.item(), global_step)
+                writer.add_scalar('Loss/batch/reconstruction', recon_loss.item(), global_step)
+                writer.add_scalar('Loss/batch/kl', kl.item(), global_step)
+                
+                global_step += 1
                 total_loss += loss.item()
                 reconstruction_loss += recon_loss.item()
                 kl_loss += kl.item()
             
+            # Calculate epoch-level average losses
+            avg_total_loss = total_loss / len(train_loader)
+            avg_recon_loss = reconstruction_loss / len(train_loader)
+            avg_kl_loss = kl_loss / len(train_loader)
+            
+            # Log epoch-level metrics
+            writer.add_scalar('Loss/epoch/total', avg_total_loss, epoch)
+            writer.add_scalar('Loss/epoch/reconstruction', avg_recon_loss, epoch)
+            writer.add_scalar('Loss/epoch/kl', avg_kl_loss, epoch)
+            
+            # Log learning rate
+            writer.add_scalar('Learning/lr', optimizer.param_groups[0]['lr'], epoch)
+            
+            # Log latent space distributions
+            writer.add_histogram('Latent/z_mean', z_mean, epoch)
+            writer.add_histogram('Latent/z_log_var', z_log_var, epoch)
+            
+            # Plot reconstruction comparison at epoch level
+            fig_recon = self._plot_reconstruction(X[0], reconstruction[0])
+            writer.add_figure('Reconstruction', fig_recon, epoch)
+            plt.close(fig_recon)
+            
             if verbose:
-                print(f"Epoch {epoch + 1}/{max_epochs} | Total loss: {total_loss / len(train_loader):.4f} | "
-                    f"Recon loss: {reconstruction_loss / len(train_loader):.4f} | "
-                    f"KL loss: {kl_loss / len(train_loader):.4f} | "
+                print(f"Epoch {epoch + 1}/{max_epochs} | Total loss: {avg_total_loss:.4f} | "
+                    f"Recon loss: {avg_recon_loss:.4f} | "
+                    f"KL loss: {avg_kl_loss:.4f} | "
                     f"I/O shape: {X.shape} | "
                     f"usesTransformer: {self.use_transformer}")
                 if self.use_transformer:
                     print([round(self.decoder.w_trans.item(), 3), round(self.decoder.w_poly.item(), 3)])
+        
+        writer.close()
+
+    def _plot_reconstruction(self, original, reconstruction):
+        """Plot comparison between original and reconstructed time series"""
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+        
+        # Ensure we're plotting a single time series
+        if len(original.shape) > 1:  # If we have a batch or multiple features
+            original = original[0] if original.shape[0] > 1 else original.squeeze()
+            reconstruction = reconstruction[0] if reconstruction.shape[0] > 1 else reconstruction.squeeze()
+            
+        original = original.cpu().detach().numpy()
+        reconstruction = reconstruction.cpu().detach().numpy()
+        
+        time = np.arange(len(original))
+        ax1.plot(time, original, label='Original')
+        ax1.set_title('Original Time Series')
+        ax1.set_xlabel('Time')
+        ax1.set_ylabel('Value')
+        ax1.legend()
+        ax1.grid(True)
+        
+        ax2.plot(time, reconstruction, label='Reconstruction', color='orange')
+        ax2.set_title('Reconstructed Time Series')
+        ax2.set_xlabel('Time')
+        ax2.set_ylabel('Value')
+        ax2.legend()
+        ax2.grid(True)
+        
+        plt.tight_layout()
+        return fig
 
     def forward(self, X):
         #print(f"input_shape: {X.shape}")
+        device = next(self.parameters()).device
         if self.use_transformer:
             z_mean, z_log_var, z, token_mean, token_log_var, token = self.encoder(X.to(device))
             x_decoded = self.decoder(z, token)

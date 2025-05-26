@@ -15,6 +15,7 @@ venv.bak/
 data/
 output/
 train_logs/
+runs/
 
 # Jupyter Notebook
 **/.ipynb_checkpoints/
