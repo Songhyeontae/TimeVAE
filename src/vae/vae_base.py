@@ -11,6 +11,8 @@ import numpy as np
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 
+from .metrics import VAEMetricsTracker
+
 
 class Sampling(nn.Module):
     def forward(self, inputs):
@@ -44,13 +46,13 @@ class VAE_Base(nn.Module, ABC):
         self.sampling = Sampling()
         self.z_kl_wt = 5
 
-    def fit_on_data(self, train_data, max_epochs=1000, verbose=0):
+    def fit_on_data(self, train_data, max_epochs=1000, verbose=0, dataset_name="unknown"):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.to(device)
         
-        # Create log directory with timestamp
+        # Create log directory with timestamp and dataset name
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_dir = f'runs/{timestamp}_{self.model_name}_seq{self.seq_len}_lat{self.latent_dim}_trans{self.use_transformer}'
+        log_dir = f'runs/{dataset_name}/{timestamp}_{self.model_name}_seq{self.seq_len}_lat{self.latent_dim}_trans{self.use_transformer}'
         writer = SummaryWriter(log_dir)
         
         # Save experiment configuration as text
@@ -95,14 +97,13 @@ class VAE_Base(nn.Module, ABC):
         train_loader = DataLoader(train_dataset, batch_size=self.batch_size, shuffle=True)
         
         optimizer = optim.Adam(self.parameters(), lr=0.002)
+        metrics_tracker = VAEMetricsTracker()
         
         global_step = 0
         
         for epoch in range(max_epochs):
             self.train()
-            total_loss = 0
-            reconstruction_loss = 0
-            kl_loss = 0
+            metrics_tracker.reset()
             
             for batch_idx, batch in enumerate(train_loader):
                 X = batch[0]
@@ -122,6 +123,12 @@ class VAE_Base(nn.Module, ABC):
                 recon_loss = recon_loss / X.size(0)
                 kl = kl / X.size(0)
                 
+                # Update metrics
+                batch_metrics = metrics_tracker.compute_batch_metrics(
+                    z_mean, z_log_var, loss, recon_loss, kl, X.size(0)
+                )
+                metrics_tracker.update(batch_metrics, X=X, X_recons=reconstruction)
+                
                 loss.backward()
                 optimizer.step()
                 
@@ -131,19 +138,20 @@ class VAE_Base(nn.Module, ABC):
                 writer.add_scalar('Loss/batch/kl', kl.item(), global_step)
                 
                 global_step += 1
-                total_loss += loss.item()
-                reconstruction_loss += recon_loss.item()
-                kl_loss += kl.item()
             
-            # Calculate epoch-level average losses
-            avg_total_loss = total_loss / len(train_loader)
-            avg_recon_loss = reconstruction_loss / len(train_loader)
-            avg_kl_loss = kl_loss / len(train_loader)
+            # Get averaged metrics for the epoch
+            epoch_metrics = metrics_tracker.get_average_metrics()
             
             # Log epoch-level metrics
-            writer.add_scalar('Loss/epoch/total', avg_total_loss, epoch)
-            writer.add_scalar('Loss/epoch/reconstruction', avg_recon_loss, epoch)
-            writer.add_scalar('Loss/epoch/kl', avg_kl_loss, epoch)
+            writer.add_scalar('Loss/epoch/total', epoch_metrics['total_loss'], epoch)
+            writer.add_scalar('Loss/epoch/reconstruction', epoch_metrics['reconstruction_loss'], epoch)
+            writer.add_scalar('Loss/epoch/kl', epoch_metrics['kl_loss'], epoch)
+            
+            # Log discriminative and predictive scores if available
+            if 'discriminative_score' in epoch_metrics:
+                writer.add_scalar('Scores/discriminative', epoch_metrics['discriminative_score'], epoch)
+            if 'predictive_score' in epoch_metrics:
+                writer.add_scalar('Scores/predictive', epoch_metrics['predictive_score'], epoch)
             
             # Log learning rate
             writer.add_scalar('Learning/lr', optimizer.param_groups[0]['lr'], epoch)
@@ -158,13 +166,23 @@ class VAE_Base(nn.Module, ABC):
             plt.close(fig_recon)
             
             if verbose:
-                print(f"Epoch {epoch + 1}/{max_epochs} | Total loss: {avg_total_loss:.4f} | "
-                    f"Recon loss: {avg_recon_loss:.4f} | "
-                    f"KL loss: {avg_kl_loss:.4f} | "
+                base_msg = (f"Epoch {epoch + 1}/{max_epochs} | Total loss: {epoch_metrics['total_loss']:.4f} | "
+                    f"Recon loss: {epoch_metrics['reconstruction_loss']:.4f} | "
+                    f"KL loss: {epoch_metrics['kl_loss']:.4f} | "
                     f"I/O shape: {X.shape} | "
                     f"usesTransformer: {self.use_transformer}")
+                
+                disc_score = epoch_metrics.get('discriminative_score')
+                pred_score = epoch_metrics.get('predictive_score')
+                
+                if disc_score is not None:
+                    base_msg += f" | Disc score: {disc_score:.4f}"
+                if pred_score is not None:
+                    base_msg += f" | Pred score: {pred_score:.4f}"
+                
+                print(base_msg)
                 if self.use_transformer:
-                    print([round(self.decoder.w_trans.item(), 3), round(self.decoder.w_poly.item(), 3)])
+                    print(f"Transformer weights: {[round(self.decoder.w_trans.item(), 3), round(self.decoder.w_poly.item(), 3)]}")
         
         writer.close()
 

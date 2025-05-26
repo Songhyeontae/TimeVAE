@@ -85,7 +85,7 @@ def instantiate_vae_model(
     return vae
 
 
-def train_vae(vae, train_data, max_epochs, verbose=0):
+def train_vae(vae, train_data, max_epochs, verbose=0, dataset_name="unknown"):
     """
     Train a VAE model.
 
@@ -97,8 +97,10 @@ def train_vae(vae, train_data, max_epochs, verbose=0):
                                     the model.
                                     Defaults to 100.
         verbose (int, optional): Verbose arg for keras model.fit()
+        dataset_name (str, optional): Name of the dataset for logging.
+                                    Defaults to "unknown".
     """
-    vae.fit_on_data(train_data, max_epochs, verbose)
+    vae.fit_on_data(train_data, max_epochs, verbose, dataset_name)
 
 
 def save_vae_model(vae, dir_path: str) -> None:
