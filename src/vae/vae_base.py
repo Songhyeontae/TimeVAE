@@ -234,3 +234,4 @@ class VAE_Base(nn.Module, ABC):
 
 if __name__ == "__main__":
     pass
+    print("test")
